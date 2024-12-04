@@ -1,6 +1,5 @@
 import { ChainType, NFTMetadata, MarketData } from '../types/nft';
 import { TezosAdapter } from '../adapters/TezosAdapter';
-import { StargazeAdapter } from '../adapters/StargazeAdapter';
 
 export class NFTManager {
   private chainAdapters: Map<ChainType, TezosAdapter | StargazeAdapter>;
