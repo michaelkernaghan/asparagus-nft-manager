@@ -9,14 +9,8 @@ export const CONFIG = {
     MARKETPLACE_CONTRACT: process.env.TEZOS_MARKETPLACE_CONTRACT,
     MARKET_APIS: {
       OBJKT: process.env.TEZOS_OBJKT_API || 'https://api.objkt.com',
-      TEIA: process.env.TEZOS_TEIA_API || 'https://api.teia.art',
-      VERSUM: process.env.TEZOS_VERSUM_API || 'https://api.versum.xyz'
+      TEIA: process.env.TEZOS_TEIA_API || 'https://api.teia.art'
     }
-  },
-  STARGAZE: {
-    RPC_URL: process.env.STARGAZE_RPC_URL || 'https://rpc.stargaze-apis.com',
-    REST_URL: process.env.STARGAZE_REST_URL || 'https://rest.stargaze-apis.com',
-    CHAIN_ID: process.env.STARGAZE_CHAIN_ID || 'stargaze-1'
   },
   APP: {
     PORT: parseInt(process.env.PORT || '3000', 10),
@@ -24,8 +18,4 @@ export const CONFIG = {
   }
 };
 
-// Type definitions for the config
 export type Config = typeof CONFIG;
-export type TezosConfig = typeof CONFIG.TEZOS;
-export type StargazeConfig = typeof CONFIG.STARGAZE;
-export type AppConfig = typeof CONFIG.APP;
