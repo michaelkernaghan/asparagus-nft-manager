@@ -2,6 +2,15 @@ import React, { useState, useEffect } from 'react';
 import type { TezosToolkit } from '@taquito/taquito';
 import type { BeaconWallet } from '@taquito/beacon-wallet';
 
+const OBJKT_MARKETPLACE_V4 = "KT1WvzYHCNBvDSdwafTHv7nJ1dWmZ8GCYuuC";
+const OBJKT_CONTRACTS = [
+  "KT1RJ6PbjHpwc3M5rw5s2Nbmefwbuwbdxton" // Add known OBJKT-compatible contracts here
+];
+
+const isObjktCompatible = (contractAddress: string): boolean => {
+  return OBJKT_CONTRACTS.includes(contractAddress);
+};
+
 const createPlaceholder = (text: string) => {
   return `data:image/svg+xml;base64,${btoa(`
     <svg width="400" height="400" xmlns="http://www.w3.org/2000/svg">
@@ -40,8 +49,6 @@ interface MarketplaceLink {
   url: string;
   icon?: string;
 }
-
-const OBJKT_MARKETPLACE_V4 = "KT1WvzYHCNBvDSdwafTHv7nJ1dWmZ8GCYuuC";
 
 const getContractAddress = (nft: NFT): string | null => {
   return nft.attributes?.contractAddress || null;
@@ -122,7 +129,6 @@ export default function NFTDashboard() {
           setTezos(tezosInstance);
           setWallet(walletInstance);
 
-          // Check if already connected
           try {
             const activeAccount = await walletInstance.client.getActiveAccount();
             if (activeAccount) {
@@ -141,6 +147,25 @@ export default function NFTDashboard() {
     };
 
     initWallet();
+  }, []);
+
+  useEffect(() => {
+    const fetchNFTs = async () => {
+      try {
+        const response = await fetch('/api/nfts');
+        if (!response.ok) throw new Error('Failed to fetch NFTs');
+        const data = await response.json();
+        console.log('First NFT data:', JSON.stringify(data[0], null, 2));
+        setNfts(data);
+      } catch (err) {
+        console.error('Error fetching NFTs:', err);
+        setError(err instanceof Error ? err.message : 'An error occurred');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchNFTs();
   }, []);
 
   const connectWallet = async () => {
@@ -177,25 +202,6 @@ export default function NFTDashboard() {
       console.error('Error disconnecting wallet:', err);
     }
   };
-
-  useEffect(() => {
-    const fetchNFTs = async () => {
-      try {
-        const response = await fetch('/api/nfts');
-        if (!response.ok) throw new Error('Failed to fetch NFTs');
-        const data = await response.json();
-        console.log('First NFT data:', JSON.stringify(data[0], null, 2));
-        setNfts(data);
-      } catch (err) {
-        console.error('Error fetching NFTs:', err);
-        setError(err instanceof Error ? err.message : 'An error occurred');
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchNFTs();
-  }, []);
 
   const handleImageError = (nftId: string) => {
     setImageLoadErrors(prev => ({ ...prev, [nftId]: true }));
@@ -234,64 +240,79 @@ export default function NFTDashboard() {
       return;
     }
 
+    const contract = getContractAddress(nft);
+    const tokenId = getTokenId(nft);
     const price = listingPrice[nft.id];
+
     if (!price || isNaN(parseFloat(price))) {
       alert('Please enter a valid price');
       return;
     }
-
-    const contract = getContractAddress(nft);
-    const tokenId = getTokenId(nft);
 
     if (!contract || !tokenId) {
       alert('Missing contract address or token ID');
       return;
     }
 
+    if (!isObjktCompatible(contract)) {
+      alert('This NFT cannot be listed on OBJKT. Only NFTs from OBJKT-compatible contracts can be listed.');
+      return;
+    }
+
+    let marketplaceContract = null;
+
     try {
       setListingStatus(prev => ({ ...prev, [nft.id]: 'listing' }));
       
-      // Get the NFT contract
       const nftContract = await tezos.wallet.at(contract);
       
-      // First, approve the marketplace to transfer the NFT
-      const updateOperatorParam = {
+      // Approve the marketplace
+      const updateOperatorParam = [{
         add_operator: {
           owner: userAddress,
           operator: OBJKT_MARKETPLACE_V4,
           token_id: parseInt(tokenId)
         }
-      };
+      }];
 
       console.log('Approving marketplace...', updateOperatorParam);
-      const opApprove = await nftContract.methods.update_operators([updateOperatorParam]).send();
+      const opApprove = await nftContract.methods.update_operators(updateOperatorParam).send();
       await opApprove.confirmation(1);
 
-      // Now create the listing on OBJKT
-      const marketplaceContract = await tezos.wallet.at(OBJKT_MARKETPLACE_V4);
-      
-      const listingParam = {
-        token: {
-          address: contract,
-          token_id: tokenId
-        },
-        amount: 1,
-        price: parseFloat(price) * 1000000, // Convert to mutez
-        expires_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString() // 1 year from now
-      };
+      marketplaceContract = await tezos.wallet.at(OBJKT_MARKETPLACE_V4);
 
-      console.log('Creating listing...', listingParam);
-      const opListing = await marketplaceContract.methods.list_token(listingParam).send();
+      // Call ask with direct parameters matching Michelson type
+      // (pair %token (address %address) (nat %token_id))
+      // (pair (or %currency ...) ...)
+      const opListing = await marketplaceContract.methods.ask(
+        // token parameters
+        [contract, parseInt(tokenId)],
+        // currency parameters
+        { '2': null }, // tez variant
+        // amount (price in mutez)
+        (parseFloat(price) * 1000000).toString(),
+        // editions
+        1,
+        // shares
+        [],
+        // expiry_time (optional)
+        null,
+        // target (optional)
+        null
+      ).send();
+
       await opListing.confirmation(1);
+      
+      console.log('Listing completed:', opListing.hash);
       
       setListingStatus(prev => ({ ...prev, [nft.id]: 'listed' }));
       setTimeout(() => {
         setListingStatus(prev => ({ ...prev, [nft.id]: 'complete' }));
       }, 3000);
-      
-      console.log('Listing completed:', opListing.hash);
     } catch (err) {
       console.error('Error listing NFT:', err);
+      console.error('Full error details:', err);
+
       setListingStatus(prev => ({ ...prev, [nft.id]: 'error' }));
       alert('Failed to list NFT: ' + (err instanceof Error ? err.message : 'Unknown error'));
       setTimeout(() => {
@@ -365,7 +386,8 @@ export default function NFTDashboard() {
       console.log('Burn operation confirmed');
 
       alert('NFT burned successfully');
-      fetchNFTs();
+      // Refresh NFTs list
+      await fetchNFTs();
     } catch (err) {
       console.error('Error burning NFT:', err);
       alert('Failed to burn NFT: ' + (err instanceof Error ? err.message : 'Unknown error'));
@@ -386,6 +408,16 @@ export default function NFTDashboard() {
     
     if (selectedIds.length === 0) {
       alert('Please select NFTs to list');
+      return;
+    }
+
+    const selectedNftObjects = selectedIds.map(id => nfts.find(n => n.id === id));
+    const nonObjktNfts = selectedNftObjects.filter(nft => 
+      nft && !isObjktCompatible(getContractAddress(nft) || '')
+    );
+
+    if (nonObjktNfts.length > 0) {
+      alert('Some selected NFTs cannot be listed on OBJKT. Please only select OBJKT-compatible NFTs.');
       return;
     }
 
@@ -463,100 +495,109 @@ export default function NFTDashboard() {
       </div>
       
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3">
-        {nfts.map((nft) => (
-          <div key={nft.id} className="border rounded-lg p-3 bg-white shadow-sm relative">
-            <input
-              type="checkbox"
-              checked={selectedNFTs[nft.id] || false}
-              onChange={(e) => setSelectedNFTs(prev => ({ ...prev, [nft.id]: e.target.checked }))}
-              className="absolute top-2 right-2 w-4 h-4"
-            />
-            <div className="aspect-square mb-3 bg-gray-100 rounded-lg overflow-hidden">
-              <img 
-                src={getImageUrl(nft)}
-                alt={nft.name || 'NFT'}
-                className="w-full h-full object-contain"
-                onError={() => handleImageError(nft.id)}
-                loading="lazy"
+        {nfts.map((nft) => {
+          const contract = getContractAddress(nft);
+          const isObjkt = contract && isObjktCompatible(contract);
+
+          return (
+            <div key={nft.id} className="border rounded-lg p-3 bg-white shadow-sm relative">
+              <input
+                type="checkbox"
+                checked={selectedNFTs[nft.id] || false}
+                onChange={(e) => setSelectedNFTs(prev => ({ ...prev, [nft.id]: e.target.checked }))}
+                className="absolute top-2 right-2 w-4 h-4"
               />
-            </div>
-            <h2 className="text-base font-bold truncate" title={nft.name}>{nft.name}</h2>
-            <p className="text-xs text-gray-600 truncate" title={nft.collection}>{nft.collection}</p>
-            {getTokenId(nft) && (
-              <p className="text-xs text-gray-500 mb-3">Token ID: {getTokenId(nft)}</p>
-            )}
-            
-            <div className="space-y-2 mt-3">
-              <div className="flex gap-1">
-                <input
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  placeholder="Price"
-                  value={listingPrice[nft.id] || ''}
-                  onChange={(e) => handlePriceChange(nft.id, e.target.value)}
-                  className="w-3/5 px-2 py-1 border rounded text-sm"
+              <div className="aspect-square mb-3 bg-gray-100 rounded-lg overflow-hidden">
+                <img 
+                  src={getImageUrl(nft)}
+                  alt={nft.name || 'NFT'}
+                  className="w-full h-full object-contain"
+                  onError={() => handleImageError(nft.id)}
+                  loading="lazy"
                 />
+              </div>
+              <h2 className="text-base font-bold truncate" title={nft.name}>{nft.name}</h2>
+              <p className="text-xs text-gray-600 truncate" title={nft.collection}>{nft.collection}</p>
+              {getTokenId(nft) && (
+                <p className="text-xs text-gray-500 mb-3">Token ID: {getTokenId(nft)}</p>
+              )}
+              
+              <div className="space-y-2 mt-3">
+                <div className="flex gap-1">
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    placeholder="Price"
+                    value={listingPrice[nft.id] || ''}
+                    onChange={(e) => handlePriceChange(nft.id, e.target.value)}
+                    className="w-3/5 px-2 py-1 border rounded text-sm"
+                    disabled={!isObjkt}
+                  />
+                  <button 
+                    onClick={() => handleListNFT(nft)}
+                    disabled={!isObjkt}
+                    className={`w-2/5 px-2 py-1 rounded text-white transition-colors text-sm whitespace-nowrap ${
+                      !isObjkt ? 'bg-gray-400 cursor-not-allowed' :
+                      listingStatus[nft.id] === 'listing' ? 'bg-yellow-500' :
+                      listingStatus[nft.id] === 'listed' ? 'bg-green-500' :
+                      listingStatus[nft.id] === 'error' ? 'bg-red-500' :
+                      'bg-blue-500 hover:bg-blue-600'
+                    }`}
+                  >
+                    {!isObjkt ? 'Not OBJKT' :
+                     listingStatus[nft.id] === 'listing' ? '...' :
+                     listingStatus[nft.id] === 'listed' ? '✓' :
+                     listingStatus[nft.id] === 'error' ? '✗' :
+                     'List'}
+                  </button>
+                </div>
+                
+                {listingStatus[nft.id] === 'complete' && (
+                  <div className="space-y-1">
+                    {getMarketplaceUrls(nft).length > 0 ? (
+                      <>
+                        <p className="text-xs text-gray-600 text-center">View on:</p>
+                        <div className="flex flex-wrap gap-1 justify-center">
+                          {getMarketplaceUrls(nft).map((link) => (
+                            <a
+                              key={link.name}
+                              href={link.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded text-xs"
+                            >
+                              <span>{link.icon}</span>
+                              <span>{link.name}</span>
+                            </a>
+                          ))}
+                        </div>
+                      </>
+                    ) : (
+                      <p className="text-xs text-yellow-600 text-center">
+                        Marketplace links unavailable
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 <button 
-                  onClick={() => handleListNFT(nft)}
-                  className={`w-2/5 px-2 py-1 rounded text-white transition-colors text-sm whitespace-nowrap ${
-                    listingStatus[nft.id] === 'listing' ? 'bg-yellow-500' :
-                    listingStatus[nft.id] === 'listed' ? 'bg-green-500' :
-                    listingStatus[nft.id] === 'error' ? 'bg-red-500' :
-                    'bg-blue-500 hover:bg-blue-600'
-                  }`}
+                  onClick={() => handleBurnNFT(nft)}
+                  disabled={burning[nft.id] || !connected}
+                  className={`w-full text-sm px-2 py-1 ${
+                    burning[nft.id] 
+                      ? 'bg-gray-400 cursor-not-allowed' 
+                      : !connected
+                      ? 'bg-gray-400 cursor-not-allowed'
+                      : 'bg-red-500 hover:bg-red-600'
+                  } text-white rounded`}
                 >
-                  {listingStatus[nft.id] === 'listing' ? '...' :
-                   listingStatus[nft.id] === 'listed' ? '✓' :
-                   listingStatus[nft.id] === 'error' ? '✗' :
-                   'List'}
+                  {burning[nft.id] ? '...' : !connected ? 'Connect' : 'Burn'}
                 </button>
               </div>
-              
-              {listingStatus[nft.id] === 'complete' && (
-                <div className="space-y-1">
-                  {getMarketplaceUrls(nft).length > 0 ? (
-                    <>
-                      <p className="text-xs text-gray-600 text-center">View on:</p>
-                      <div className="flex flex-wrap gap-1 justify-center">
-                        {getMarketplaceUrls(nft).map((link) => (
-                          <a
-                            key={link.name}
-                            href={link.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded text-xs"
-                          >
-                            <span>{link.icon}</span>
-                            <span>{link.name}</span>
-                          </a>
-                        ))}
-                      </div>
-                    </>
-                  ) : (
-                    <p className="text-xs text-yellow-600 text-center">
-                      Marketplace links unavailable
-                    </p>
-                  )}
-                </div>
-              )}
-
-              <button 
-                onClick={() => handleBurnNFT(nft)}
-                disabled={burning[nft.id] || !connected}
-                className={`w-full text-sm px-2 py-1 ${
-                  burning[nft.id] 
-                    ? 'bg-gray-400 cursor-not-allowed' 
-                    : !connected
-                    ? 'bg-gray-400 cursor-not-allowed'
-                    : 'bg-red-500 hover:bg-red-600'
-                } text-white rounded`}
-              >
-                {burning[nft.id] ? '...' : !connected ? 'Connect' : 'Burn'}
-              </button>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {nfts.length === 0 && !loading && (
